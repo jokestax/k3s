@@ -23,7 +23,6 @@ buildDate=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 VERSIONFLAGS="
     -X ${PKG}/pkg/version.Version=${VERSION}
     -X ${PKG}/pkg/version.GitCommit=${COMMIT:0:8}
-    -X ${PKG}/pkg/version.UpstreamGolang=${VERSION_GOLANG}
 
     -X ${PKG_K8S_CLIENT}/version.gitVersion=${VERSION}
     -X ${PKG_K8S_CLIENT}/version.gitCommit=${COMMIT}
@@ -82,6 +81,12 @@ case ${OS} in
       TAGS="$TAGS selinux"
       RUNC_TAGS="$RUNC_TAGS selinux"
     fi
+
+    # runc's vendored libseccomp-golang can fail on riscv64 with duplicate
+    # C_ARCH_* switch cases when the seccomp build tag is enabled.
+    if [ "${ARCH}" = "riscv64" ]; then
+      RUNC_TAGS="${RUNC_TAGS/seccomp/}"
+    fi
     ;;
   windows)
     TAGS="$TAGS no_cri_dockerd"
@@ -107,13 +112,10 @@ fi
 
 mkdir -p bin
 
-if [ ${ARCH} = armv7l ] || [ ${ARCH} = arm ]; then
-    export GOARCH="arm"
-    export GOARM="7"
-fi
-
-if [ ${ARCH} = s390x ]; then
-    export GOARCH="s390x"
+export GOOS=${GOOS:-${OS}}
+export GOARCH=${GOARCH:-${ARCH}}
+if [ ${ARCH} = arm ]; then
+  export GOARM=${GOARM:-7}
 fi
 
 k3s_binaries=(
@@ -198,11 +200,16 @@ case ${OS} in
     echo Building runc
     pushd ./build/src/github.com/opencontainers/runc
     rm -f runc
-    make EXTRA_FLAGS="-gcflags=\"all=${GCFLAGS}\"" EXTRA_LDFLAGS="$LDFLAGS" BUILDTAGS="$RUNC_TAGS" $RUNC_STATIC
+    make GO="${GO}" EXTRA_FLAGS="-gcflags=\"all=${GCFLAGS}\"" EXTRA_LDFLAGS="$LDFLAGS" BUILDTAGS="$RUNC_TAGS" $RUNC_STATIC
     popd
     cp -vf ./build/src/github.com/opencontainers/runc/runc ./bin/
     ;;
   windows)
+    if [ "${ARCH}" != "amd64" ]; then
+      echo "[ERROR] unsupported windows architecture: ${ARCH}"
+      exit 1
+    fi
+
     echo Building containerd-shim-runhcs-v1
     pushd ./build/src/github.com/microsoft/hcsshim
     TAGS="${TAGS/netcgo/netgo}"

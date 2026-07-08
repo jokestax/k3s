@@ -11,7 +11,6 @@ import (
 	"sync"
 	"time"
 
-	systemd "github.com/coreos/go-systemd/v22/daemon"
 	"github.com/k3s-io/k3s/pkg/agent"
 	"github.com/k3s-io/k3s/pkg/agent/https"
 	"github.com/k3s-io/k3s/pkg/agent/loadbalancer"
@@ -37,6 +36,10 @@ import (
 	"github.com/k3s-io/k3s/pkg/util/permissions"
 	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/k3s-io/k3s/pkg/vpn"
+
+	systemd "github.com/coreos/go-systemd/v22/daemon"
+	helmapp "github.com/k3s-io/helm-controller/pkg/app"
+	helmchart "github.com/k3s-io/helm-controller/pkg/controllers/chart"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -59,8 +62,6 @@ func RunWithControllers(app *cli.Context, leaderControllers server.CustomControl
 
 func run(app *cli.Context, cfg *cmds.Server, leaderControllers server.CustomControllers, controllers server.CustomControllers) (rerr error) {
 	var err error
-	// Validate build env
-	cmds.MustValidateGolang()
 
 	// hide process arguments from ps output, since they may contain
 	// database credentials or other secrets.
@@ -88,6 +89,9 @@ func run(app *cli.Context, cfg *cmds.Server, leaderControllers server.CustomCont
 	// If exiting due to an error, ensure that contexts are cancelled so that the
 	// WaitGroup exits.  Otherwise, wait for something else to initiate shutdown.
 	defer func() {
+		if r := recover(); r != nil {
+			rerr = fmt.Errorf("server panicked: %v", r)
+		}
 		if rerr != nil {
 			// do not need to pass the error in here, it will be reported by the CLI error handler
 			signals.RequestShutdown(nil)
@@ -144,6 +148,14 @@ func run(app *cli.Context, cfg *cmds.Server, leaderControllers server.CustomCont
 	serverConfig.ControlConfig.Datastore.BackendTLSConfig.CertFile = cfg.DatastoreCertFile
 	serverConfig.ControlConfig.Datastore.BackendTLSConfig.KeyFile = cfg.DatastoreKeyFile
 	serverConfig.ControlConfig.Datastore.Endpoint = cfg.DatastoreEndpoint
+	serverConfig.ControlConfig.Datastore.S3Config.AccessKey = cfg.EtcdS3AccessKey
+	serverConfig.ControlConfig.Datastore.S3Config.Bucket = cfg.EtcdS3BucketName
+	serverConfig.ControlConfig.Datastore.S3Config.CABundle = cfg.EtcdS3EndpointCA
+	serverConfig.ControlConfig.Datastore.S3Config.Endpoint = cfg.EtcdS3Endpoint
+	serverConfig.ControlConfig.Datastore.S3Config.Folder = cfg.EtcdS3Folder
+	serverConfig.ControlConfig.Datastore.S3Config.Region = cfg.EtcdS3Region
+	serverConfig.ControlConfig.Datastore.S3Config.SecretKey = cfg.EtcdS3SecretKey
+	serverConfig.ControlConfig.Datastore.S3Config.SessionToken = cfg.EtcdS3SessionToken
 	serverConfig.ControlConfig.Datastore.WaitGroup = wg
 	serverConfig.ControlConfig.DataDir = cfg.DataDir
 	serverConfig.ControlConfig.KubeConfigOutput = cfg.KubeConfigOutput
@@ -162,7 +174,9 @@ func run(app *cli.Context, cfg *cmds.Server, leaderControllers server.CustomCont
 	serverConfig.ControlConfig.ExtraAPIArgs = cfg.ExtraAPIArgs.Value()
 	serverConfig.ControlConfig.ExtraControllerArgs = cfg.ExtraControllerArgs.Value()
 	serverConfig.ControlConfig.ExtraEtcdArgs = cfg.ExtraEtcdArgs.Value()
-	serverConfig.ControlConfig.ExtraSchedulerAPIArgs = cfg.ExtraSchedulerArgs.Value()
+	serverConfig.ControlConfig.ExtraSchedulerArgs = cfg.ExtraSchedulerArgs.Value()
+	serverConfig.ControlConfig.ExtraCloudControllerArgs = cfg.ExtraCloudControllerArgs.Value()
+	serverConfig.ControlConfig.ExtraHelmArgs = cfg.ExtraHelmArgs.Value()
 	serverConfig.ControlConfig.ClusterDomain = cfg.ClusterDomain
 	serverConfig.ControlConfig.KineTLS = cfg.KineTLS
 	serverConfig.ControlConfig.AdvertiseIP = cfg.AdvertiseIP
@@ -171,7 +185,6 @@ func run(app *cli.Context, cfg *cmds.Server, leaderControllers server.CustomCont
 	serverConfig.ControlConfig.FlannelIPv6Masq = cfg.FlannelIPv6Masq
 	serverConfig.ControlConfig.FlannelExternalIP = cfg.FlannelExternalIP
 	serverConfig.ControlConfig.EgressSelectorMode = cfg.EgressSelectorMode
-	serverConfig.ControlConfig.ExtraCloudControllerArgs = cfg.ExtraCloudControllerArgs.Value()
 	serverConfig.ControlConfig.DisableCCM = cfg.DisableCCM
 	serverConfig.ControlConfig.DisableNPC = cfg.DisableNPC
 	serverConfig.ControlConfig.DisableHelmController = cfg.DisableHelmController
@@ -427,6 +440,30 @@ func run(app *cli.Context, cfg *cmds.Server, leaderControllers server.CustomCont
 	serverConfig.ControlConfig.TLSCipherSuites, err = kubeapiserverflag.TLSCipherSuites(tlsCipherSuites)
 	if err != nil {
 		return errors.WithMessage(err, "invalid tls-cipher-suites")
+	}
+
+	if !serverConfig.ControlConfig.DisableHelmController {
+		argsMap := map[string]string{}
+		if serverConfig.ControlConfig.HelmJobImage != "" {
+			logrus.Warnf("--helm-job-image is deprecated, please use --helm-controller-arg=default-job-image=%s", serverConfig.ControlConfig.HelmJobImage)
+			argsMap["default-job-image"] = serverConfig.ControlConfig.HelmJobImage
+		}
+
+		helmConfig, err := helmapp.Config(util.GetArgs(argsMap, serverConfig.ControlConfig.ExtraHelmArgs))
+		if err != nil {
+			return errors.WithMessage(err, "failed to parse helm-controller-arg")
+		}
+
+		// Apply SystemDefaultRegistry setting to Helm before starting controllers.
+		// Internally helm-controller defaults to latest tag, but we inject a immutable version at build time.
+		if helmConfig.DefaultJobImage != "" {
+			helmchart.DefaultJobImage = helmConfig.DefaultJobImage
+		} else if serverConfig.ControlConfig.SystemDefaultRegistry != "" {
+			helmchart.DefaultJobImage = serverConfig.ControlConfig.SystemDefaultRegistry + "/" + helmchart.DefaultJobImage
+		}
+
+		helmchart.JobTolerations = helmConfig.JobTolerations
+		helmchart.JobResources = helmConfig.JobResources
 	}
 
 	// If performing a cluster reset, make sure control-plane components are

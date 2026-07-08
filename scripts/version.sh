@@ -1,13 +1,9 @@
 #!/bin/bash
 
 GO=${GO-go}
-ARCH=${ARCH:-$("${GO}" env GOARCH)}
-OS=${OS:-$("${GO}" env GOOS)}
-SUFFIX="-${ARCH}"
+. ./scripts/platform.sh
 
-if [ -z "$NO_DAPPER" ]; then
-    . ./scripts/git_version.sh
-fi
+. ./scripts/git_version.sh
 
 get-module-version(){
   go list -mod=readonly -m -f '{{if .Replace}}{{.Replace.Version}}{{else}}{{.Version}}{{end}}' $1
@@ -63,19 +59,19 @@ if [ -z "$VERSION_KUBE_ROUTER" ]; then
     VERSION_KUBE_ROUTER="v0.0.0"
 fi
 
-VERSION_ROOT="v0.15.0"
+VERSION_ROOT="v0.15.2"
 case ${ARCH} in
     amd64)
-      K3S_ROOT_SHA256="20066815d9941185fce3934cc3bae2fa3e2dbb46ca7e63462efb2ea59f1b15c4"
+      K3S_ROOT_SHA256=9e56393cf828583b50b6b0e66cc47cb6a5e1d0489eab1436421bc20c56c0cf65
     ;;
     arm)
-      K3S_ROOT_SHA256="2e43dac7750da52a756a9d4e8598d6e89937d565582660b26ca124bd9c8dbfaa"
+      K3S_ROOT_SHA256=af8614e5b9e2f87d30bd4387c512703c6bf2bc53a3764e5181ef2f2eaccab8d2
     ;;
     arm64)
-      K3S_ROOT_SHA256="4bdfc715dc8b5e2c4956f8686b895a56386f4cc6468215dcd22130a680650577"
+      K3S_ROOT_SHA256=7a754f4aeb1771b2b147ac8ff48fbc0a152f4ab1c6b4f16f94b1121e5eaaba50
     ;;
     riscv64)
-      K3S_ROOT_SHA256="0e79998acaa156059ba1ff676a4e5f290069e25f799de43ee016a0e780f9d4d3"
+      K3S_ROOT_SHA256=3b76a4a5bfc5c8623702a3b99e3015cd36b0336dd73c7ba4a765d018dc5a9685
     ;;
     *)
       echo "[ERROR] unsupported architecture: ${ARCH}"
@@ -83,10 +79,7 @@ case ${ARCH} in
     ;;
 esac
 
-VERSION_HELM_JOB="v0.9.17-build20260422"
-
-GO_VERSION_URL="https://raw.githubusercontent.com/kubernetes/kubernetes/${VERSION_K8S}/.go-version"
-VERSION_GOLANG="go"$(curl -sL "${GO_VERSION_URL}" | tr -d '[:space:]')
+VERSION_HELM_JOB="v0.11.1-build20260615"
 
 if [[ -n "$GIT_TAG" ]]; then
     if [[ ! "$GIT_TAG" =~ ^"$VERSION_K8S"[+-] ]]; then
@@ -98,8 +91,3 @@ else
     VERSION="$VERSION_K8S+k3s-${COMMIT:0:8}$DIRTY"
 fi
 VERSION_TAG="$(sed -e 's/+/-/g' <<< "$VERSION")"
-
-BINARY_POSTFIX=
-if [ ${OS} = windows ]; then
-    BINARY_POSTFIX=.exe
-fi

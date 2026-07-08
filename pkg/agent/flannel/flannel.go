@@ -15,6 +15,7 @@
 package flannel
 
 import (
+	"context"
 	"fmt"
 	"math/big"
 	"net"
@@ -30,7 +31,6 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/k3s-io/k3s/pkg/util/errors"
 	"github.com/sirupsen/logrus"
-	"golang.org/x/net/context"
 
 	// Backends need to be imported for their init() to get executed and them to register
 	_ "github.com/flannel-io/flannel/pkg/backend/extension"
@@ -175,6 +175,7 @@ func LookupExtInterface(iface *net.Interface, nm netMode) (*backend.ExternalInte
 
 	return &backend.ExternalInterface{
 		Iface:       iface,
+		IfaceName:   iface.Name,
 		IfaceAddr:   ifaceAddr[0],
 		IfaceV6Addr: ifacev6Addr[0],
 		ExtAddr:     ifaceAddr[0],

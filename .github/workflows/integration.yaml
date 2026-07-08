@@ -9,6 +9,7 @@ on:
       - "!tests/integration**"
       - ".github/**"
       - "!.github/workflows/integration.yaml"
+      - "!.github/workflows/build-k3s.yaml"
   pull_request:
     paths-ignore:
       - "**.md"
@@ -32,11 +33,13 @@ jobs:
   build:
     uses: ./.github/workflows/build-k3s.yaml
     with:
-      os: linux
+      platforms: linux/amd64
+      test-coverage: true
   build-windows:
     uses: ./.github/workflows/build-k3s.yaml
     with:
-      os: windows
+      platforms: windows/amd64
+      test-coverage: true
   itest:
     needs: build
     name: Integration Tests
@@ -45,8 +48,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        itest: [certrotation, cacertrotation, etcdrestore, localstorage, startup, custometcdargs, etcdsnapshot, kubeflags, longhorn, secretsencryption, flannelnone]
-      max-parallel: 3
+        # Ordered longest-first from CI timings to reduce matrix tail latency.
+        itest: [startup, etcdsnapshot, kubeflags, cacertrotation, longhorn, secretsencryption, certrotation, etcdrestore, localstorage, flannelnone, custometcdargs]
+      max-parallel: 5
     steps:
     - name: Remove Unnecessary Tools
       working-directory: /
@@ -100,7 +104,7 @@ jobs:
     - name: Generate coverage report
       run: sudo -E env "PATH=$PATH" go tool covdata textfmt -i $GOCOVERDIR -o ${{ matrix.itest }}.out
     - name: Upload Results To Codecov
-      uses: codecov/codecov-action@1af58845a975a7985b0beb0cbe6fbbb71a41dbad # v5
+      uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v5
       with:
         token: ${{ secrets.CODECOV_TOKEN }}
         files: ./${{ matrix.itest }}.out
@@ -147,7 +151,7 @@ jobs:
     - name: Generate coverage report
       run: go tool covdata textfmt -i $Env:GOCOVERDIR -o windows.out
     - name: Upload Results To Codecov
-      uses: codecov/codecov-action@1af58845a975a7985b0beb0cbe6fbbb71a41dbad # v5
+      uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v5
       with:
         token: ${{ secrets.CODECOV_TOKEN }}
         files: ./windows.out

@@ -11,6 +11,7 @@ on:
       - ".github/**"
       - "!.github/actions/**"
       - "!.github/workflows/e2e.yaml"
+      - "!.github/workflows/build-k3s.yaml"
   pull_request:
     paths-ignore:
       - "**.md"
@@ -35,13 +36,14 @@ jobs:
     uses: ./.github/workflows/build-k3s.yaml
     with:
       upload-image: true
+      test-coverage: true
   build-arm64:
     uses: ./.github/workflows/build-k3s.yaml
     permissions:
       contents: read
       packages: write
     with:
-      arch: arm64
+      platforms: linux/arm64
       upload-image: true
   e2e:
     name: "E2E Tests"
@@ -51,7 +53,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        etest: [btrfs, embeddedmirror, externalip, privateregistry, rootless, s3, startup, wasm, multus]
+        # Ordered longest-first from CI timings to reduce matrix tail latency.
+        etest: [startup, s3, embeddedmirror, privateregistry, wasm, externalip, rootless, multus, btrfs]
       max-parallel: 5
     steps:
       - name: Remove Unnecessary Tools
@@ -77,50 +80,67 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with: {fetch-depth: 1}
       - name: Set up Docker
-        uses: docker/setup-docker-action@1a6edb0ba9ac496f6850236981f15d8f9a82254d # v5
+        uses: docker/setup-docker-action@0234bb73ccb40f0c430b795634f9247e2b5c2d23 # v5
         with:
           version: type=image,tag=28
           daemon-config: '{"features":{"containerd-snapshotter":true}}'
           set-host: true
       - name: Set up vagrant and libvirt
         uses: ./.github/actions/vagrant-setup
-      - name: Vagrant R/W Cache
+      - name: Vagrant Box R/W Cache
         if: matrix.etest != 'btrfs' && github.ref == 'refs/heads/main'
-        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: |
              ~/.vagrant.d/boxes
           key: ${{ matrix.etest != 'btrfs' && 'vagrant-box-ubuntu-2404' || 'vagrant-box-leap' }}
-      - name: Vagrant Read Cache
+      - name: Vagrant Box Read Cache
         if: matrix.etest != 'btrfs' && github.ref != 'refs/heads/main'
-        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: |
              ~/.vagrant.d/boxes
           key: ${{ matrix.etest != 'btrfs' && 'vagrant-box-ubuntu-2404' || 'vagrant-box-leap' }}
+      - name: Vagrant Plugins R/W Cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        if: github.ref == 'refs/heads/main'
+        with:
+          path: |
+             ~/.vagrant.d/gems
+             ~/.vagrant.d/plugins.json
+          key: vagrant-plugins
+      - name: Vagrant Plugins Read Cache
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        if: github.ref != 'refs/heads/main'
+        with:
+          path: |
+             ~/.vagrant.d/gems
+             ~/.vagrant.d/plugins.json
+          key: vagrant-plugins
       - name: "Vagrant Plugin(s)"
-        run: vagrant plugin install vagrant-k3s vagrant-reload vagrant-scp
+        run: |
+          for plugin in vagrant-k3s vagrant-reload vagrant-scp; do
+            if ! vagrant plugin list | grep -q "^${plugin} "; then
+              vagrant plugin install "${plugin}"
+            fi
+          done
       - name: Install Go
         uses: ./.github/actions/setup-go
-      - name: Install Kubectl
-        run: |
-           set -euo pipefail
-           STABLE_VERSION=v1.34.6
-           KUBECTL_SHA256=3166155b17198c0af34ff5a360bd4d9d58db98bafadc6f3c2a57ae560563cd6b
-           curl -fsSLo ./kubectl "https://dl.k8s.io/release/${STABLE_VERSION}/bin/linux/amd64/kubectl"
-           echo "${KUBECTL_SHA256}  ./kubectl" | sha256sum -c -
-           sudo install -o root -g root -m 0755 ./kubectl /usr/local/bin/kubectl
-           rm -f ./kubectl
       - name: "Download k3s binary"
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: k3s-amd64
           path: ./dist/artifacts
+      - name: Install kubectl from K3s artifacts
+        run: |
+          sudo install -o root -g root -m 0755 ./dist/artifacts/bin-k3s /usr/local/bin/k3s
+          sudo ln -sf /usr/local/bin/k3s /usr/local/bin/kubectl
       - name: Run ${{ matrix.etest }} Test
         env:
           E2E_GOCOVER: "true"
         run: | 
           chmod +x ./dist/artifacts/k3s
+          mkdir -p /tmp/k3scov
           cd tests/e2e/${{ matrix.etest }}
           go test -timeout=45m ./${{ matrix.etest }}_test.go -test.v -ginkgo.v -ci -local
       - name: On Failure, Upload Journald Logs
@@ -137,7 +157,7 @@ jobs:
           ## If no one connects after 5 minutes, shut down server.
           wait-timeout-minutes: 5
       - name: Upload Results To Codecov
-        uses: codecov/codecov-action@1af58845a975a7985b0beb0cbe6fbbb71a41dbad # v5
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: tests/e2e/${{ matrix.etest }}/coverage.out
@@ -191,7 +211,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        dtest: [autoimport, basics, bootstraptoken, cacerts, dualstack, etcd, hardened, lazypull, nixsnapshotter, skew, secretsencryption, snapshotrestore, svcpoliciesandfirewall, token, upgrade]
+        dtest: [autoimport, basics, bootstraptoken, cacerts, dualstack, etcd, t4, hardened, lazypull, nixsnapshotter, skew, secretsencryption, snapshotrestore, svcpoliciesandfirewall, token, upgrade]
         arch: [amd64, arm64]
         exclude:
           - dtest: autoimport
@@ -237,7 +257,7 @@ jobs:
         name: k3s-${{ matrix.arch }}
         path: ./dist/artifacts
     - name: Set up Docker
-      uses: docker/setup-docker-action@1a6edb0ba9ac496f6850236981f15d8f9a82254d # v5
+      uses: docker/setup-docker-action@0234bb73ccb40f0c430b795634f9247e2b5c2d23 # v5
       with:
         version: type=image,tag=28
         daemon-config: '{"features":{"containerd-snapshotter":true}}'
@@ -253,7 +273,9 @@ jobs:
         echo "K3S_IMAGE=$IMAGE_TAG" >> $GITHUB_ENV
     - name: Install Nix
       if: matrix.dtest == 'nixsnapshotter'
-      uses: DeterminateSystems/nix-installer-action@c5a866b6ab867e88becbed4467b93592bce69f8a # v21
+      uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+      with:
+        summarize: false
     - name: Build nix test image
       if: matrix.dtest == 'nixsnapshotter'
       run: |
@@ -280,3 +302,40 @@ jobs:
         else
           ./${{ matrix.dtest }}.test -test.timeout=0 -test.v -ginkgo.v -k3sImage=$K3S_IMAGE
         fi
+
+  docker-large:
+    needs: [build, build-go-tests]
+    name: Docker Large
+    timeout-minutes: 45
+    runs-on: cncf-ubuntu-32-128-x86
+    if: github.repository_owner == 'k3s-io'
+    steps:
+    - name: Checkout
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+    - name: Set up Docker
+      uses: docker/setup-docker-action@0234bb73ccb40f0c430b795634f9247e2b5c2d23 # v5
+      with:
+        version: type=image,tag=28
+        set-host: true
+    - name: "Download K3s image"
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      with:
+        name: k3s-amd64
+        path: ./dist/artifacts
+    - name: Load and set K3s image
+      run: |
+        chmod +x ./dist/artifacts/k3s
+        docker image load -i ./dist/artifacts/k3s-image.tar
+        IMAGE_TAG=$(docker image ls --format '{{.Repository}}:{{.Tag}}' | grep 'rancher/k3s')
+        echo "K3S_IMAGE=$IMAGE_TAG" >> $GITHUB_ENV
+    - name: Download Go Tests
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      with:
+        name: docker-go-tests-amd64
+        path: ./dist/artifacts
+    - name: Run scale test
+      run: |
+        chmod +x ./dist/artifacts/scale.test
+        mv ./dist/artifacts/scale.test ./tests/docker/scale/
+        cd ./tests/docker/scale
+        ./scale.test -test.timeout=40m -test.v -ginkgo.v -ci -k3sImage=$K3S_IMAGE
